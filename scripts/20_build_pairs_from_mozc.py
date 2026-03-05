@@ -168,6 +168,17 @@ def find_dict_files(mozc_dir: Path) -> List[Path]:
     return [p for p in cands if p.is_file()]
 
 
+def build_existing_yomi_set(dict_files: Sequence[Path]) -> Set[str]:
+    """
+    Build a set of yomi that already exist in Mozc dictionaries.
+    Used to avoid generating variants that collide with real readings already present.
+    """
+    s: Set[str] = set()
+    for e in iter_mozc_entries(dict_files):
+        s.add(e.yomi)
+    return s
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=(
@@ -209,6 +220,14 @@ def main() -> None:
         help="Maximum yomi length (in characters). 0 = no maximum",
     )
 
+    # NEW: avoid generating variants that already exist as yomi in dictionaries
+    # default behavior: SKIP such variants
+    ap.add_argument(
+        "--allow_existing_yomi_variants",
+        action="store_true",
+        help="Allow emitting variant yomi even if that yomi already exists in dictionaries (default: skip them).",
+    )
+
     args = ap.parse_args()
 
     mozc_dir = Path(args.mozc_dir)
@@ -223,12 +242,22 @@ def main() -> None:
     for p in dict_files:
         print(f"  - {p}")
 
+    # Build existing yomi set (1st pass)
+    skip_existing_yomi_variants = not args.allow_existing_yomi_variants
+    existing_yomi: Set[str] = set()
+    if skip_existing_yomi_variants:
+        print("[info] building existing yomi set (to avoid generating variants that already exist)...")
+        existing_yomi = build_existing_yomi_set(dict_files)
+        print(f"[info] existing_yomi_count={len(existing_yomi)}")
+
     seen_pair: Set[str] = set()
     n_in = 0
     n_matched = 0
     n_skipped_big = 0
+    n_skipped_existing_yomi_variant = 0
     n_out = 0
 
+    # 2nd pass: actual output
     with out_tsv.open("w", encoding="utf-8", newline="\n") as w:
         for e in iter_mozc_entries(dict_files):
             n_in += 1
@@ -238,7 +267,7 @@ def main() -> None:
             if args.filter_prefix and not e.yomi.startswith(args.filter_prefix):
                 continue
 
-            # NEW: yomi length filtering (based on original yomi)
+            # yomi length filtering (based on original yomi)
             ylen = len(e.yomi)
             if args.min_yomi_len and ylen < args.min_yomi_len:
                 continue
@@ -257,23 +286,34 @@ def main() -> None:
                 continue
 
             for v in variants:
+                # NEW: skip variant yomi if it already exists as a real yomi in dictionaries
+                # but NEVER skip the original yomi itself.
+                if skip_existing_yomi_variants and v != e.yomi and v in existing_yomi:
+                    n_skipped_existing_yomi_variant += 1
+                    continue
+
                 line = f"{v}\t{e.surface}"
                 if args.dedup:
                     if line in seen_pair:
                         continue
                     seen_pair.add(line)
+
                 w.write(line + "\n")
                 n_out += 1
 
                 if args.max_lines and n_out >= args.max_lines:
                     print(f"[done] reached --max_lines={args.max_lines}")
                     print(
-                        f"[stat] entries_in={n_in}, matched={n_matched}, skipped_big={n_skipped_big}, lines_out={n_out}"
+                        f"[stat] entries_in={n_in}, matched={n_matched}, skipped_big={n_skipped_big}, "
+                        f"skipped_existing_yomi_variant={n_skipped_existing_yomi_variant}, lines_out={n_out}"
                     )
                     print(f"[ok  ] wrote: {out_tsv}")
                     return
 
-    print(f"[stat] entries_in={n_in}, matched={n_matched}, skipped_big={n_skipped_big}, lines_out={n_out}")
+    print(
+        f"[stat] entries_in={n_in}, matched={n_matched}, skipped_big={n_skipped_big}, "
+        f"skipped_existing_yomi_variant={n_skipped_existing_yomi_variant}, lines_out={n_out}"
+    )
     print(f"[ok  ] wrote: {out_tsv}")
 
 
